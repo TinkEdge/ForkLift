@@ -1,0 +1,260 @@
+/*
+  FORKLIFT ROBOT - SIMPLE LOW-POWER CONTROLLER
+  Wi-Fi: Forklift_Robot_Pro / 123456789  ->  http://192.168.4.1
+  Drive PWM 130, Lift PWM 100 (fixed)
+*/
+
+#include <WiFi.h>
+#include <WebServer.h>
+
+const char* AP_SSID = "Forklift_Robot_Pro";
+const char* AP_PASSWORD = "123456789";
+
+WebServer server(80);
+
+const int DRIVE_SPEED = 130;
+const int LIFT_SPEED = 100;
+
+// Drive motors - L298N #1
+#define ENA 25
+#define IN1 5
+#define IN2 18
+#define ENB 14
+#define IN3 12
+#define IN4 13
+
+// Lift motor - L298N #2
+#define L_ENA 33
+#define L_IN1 32
+#define L_IN2 4
+
+const unsigned long TIMEOUT_MS = 1500;
+
+unsigned long lastDrive = 0;
+unsigned long lastLift = 0;
+const char* driveState = "STOPPED";
+const char* liftState = "STOPPED";
+bool emergency = false;
+
+void stopDrive() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+  analogWrite(ENA, 0);
+  analogWrite(ENB, 0);
+  driveState = "STOPPED";
+}
+
+void stopLift() {
+  digitalWrite(L_IN1, LOW);
+  digitalWrite(L_IN2, LOW);
+  analogWrite(L_ENA, 0);
+  liftState = "STOPPED";
+}
+
+// l = left motor (-1 back, 0 stop, 1 forward), r = right motor
+void drive(int l, int r, const char* name) {
+  digitalWrite(IN1, l > 0);
+  digitalWrite(IN2, l < 0);
+  digitalWrite(IN3, r > 0);
+  digitalWrite(IN4, r < 0);
+  analogWrite(ENA, l ? DRIVE_SPEED : 0);
+  analogWrite(ENB, r ? DRIVE_SPEED : 0);
+  driveState = name;
+  lastDrive = millis();
+}
+
+void lift(int dir, const char* name) {
+  digitalWrite(L_IN1, dir > 0);
+  digitalWrite(L_IN2, dir < 0);
+  analogWrite(L_ENA, LIFT_SPEED);
+  liftState = name;
+  lastLift = millis();
+}
+
+// Very simple page: plain buttons, no images, no heavy CSS
+const char PAGE[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Forklift</title>
+<style>
+body{font-family:Arial;text-align:center;margin:10px}
+button{width:30%;height:60px;margin:4px;font-size:16px}
+#e{background:#c00;color:#fff;width:64%}
+#r{width:30%}
+</style>
+</head>
+<body>
+<h3>Forklift Robot</h3>
+<p id="s">Drive: STOPPED | Lift: STOPPED</p>
+
+<div>
+<button data-d="forward">FWD</button><br>
+<button data-d="left">LEFT</button>
+<button onclick="send('stop');send('lift_stop')">STOP</button>
+<button data-d="right">RIGHT</button><br>
+<button data-d="backward">BACK</button>
+</div>
+
+<p>Lift</p>
+<div>
+<button data-l="lift_up">UP</button>
+<button data-l="lift_down">DOWN</button>
+</div>
+
+<p>
+<button id="e" onclick="send('emergency')">EMERGENCY STOP</button>
+<button id="r" onclick="send('reset_emergency')">RESET</button>
+</p>
+
+<script>
+var timers = {};
+
+function send(c) {
+  return fetch("/command?cmd=" + c).catch(function(){});
+}
+
+function hold(btn, cmd, stopCmd) {
+  var start = function(e) {
+    e.preventDefault();
+    if (timers[cmd]) return;
+    send(cmd);
+    timers[cmd] = setInterval(function(){ send(cmd); }, 500);
+  };
+  var end = function() {
+    if (!timers[cmd]) return;
+    clearInterval(timers[cmd]);
+    timers[cmd] = null;
+    send(stopCmd);
+  };
+  btn.addEventListener("pointerdown", start);
+  btn.addEventListener("pointerup", end);
+  btn.addEventListener("pointercancel", end);
+  btn.addEventListener("pointerleave", end);
+}
+
+document.querySelectorAll("[data-d]").forEach(function(b){
+  hold(b, b.dataset.d, "stop");
+});
+document.querySelectorAll("[data-l]").forEach(function(b){
+  hold(b, b.dataset.l, "lift_stop");
+});
+
+document.addEventListener("visibilitychange", function(){
+  if (document.hidden) { send("stop"); send("lift_stop"); }
+});
+
+// Status refresh every 3 seconds (low traffic)
+setInterval(function(){
+  fetch("/status").then(function(r){ return r.text(); })
+    .then(function(t){ document.getElementById("s").innerText = t; })
+    .catch(function(){ document.getElementById("s").innerText = "Connection lost"; });
+}, 3000);
+</script>
+</body>
+</html>
+)rawliteral";
+
+void handleRoot() {
+  server.send_P(200, "text/html", PAGE);
+}
+
+void handleCommand() {
+  if (!server.hasArg("cmd")) {
+    server.send(400, "text/plain", "Missing command");
+    return;
+  }
+
+  String c = server.arg("cmd");
+
+  if (c == "reset_emergency") {
+    emergency = false;
+    stopDrive();
+    stopLift();
+    server.send(200, "text/plain", "OK");
+    return;
+  }
+
+  if (emergency) {
+    server.send(423, "text/plain", "Emergency active");
+    return;
+  }
+
+  if      (c == "forward")   drive(1, 1, "FORWARD");
+  else if (c == "backward")  drive(-1, -1, "BACKWARD");
+  else if (c == "left")      drive(-1, 1, "LEFT");
+  else if (c == "right")     drive(1, -1, "RIGHT");
+  else if (c == "stop")      stopDrive();
+  else if (c == "lift_up")   lift(1, "UP");
+  else if (c == "lift_down") lift(-1, "DOWN");
+  else if (c == "lift_stop") stopLift();
+  else if (c == "emergency") {
+    emergency = true;
+    stopDrive();
+    stopLift();
+  } else {
+    server.send(400, "text/plain", "Unknown command");
+    return;
+  }
+
+  server.send(200, "text/plain", "OK");
+}
+
+void handleStatus() {
+  String s = emergency ? "EMERGENCY STOP" :
+             String("Drive: ") + driveState + " | Lift: " + liftState;
+  server.send(200, "text/plain", s);
+}
+
+void setup() {
+  // Lower CPU speed = less power (80 MHz is enough, Wi-Fi still works)
+  setCpuFrequencyMhz(80);
+
+  Serial.begin(115200);
+
+  pinMode(ENA, OUTPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(ENB, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  pinMode(L_ENA, OUTPUT);
+  pinMode(L_IN1, OUTPUT);
+  pinMode(L_IN2, OUTPUT);
+
+  stopDrive();
+  stopLift();
+
+  WiFi.mode(WIFI_AP);
+  // channel 1, visible, max 2 clients (less load)
+  if (!WiFi.softAP(AP_SSID, AP_PASSWORD, 1, 0, 2)) {
+    Serial.println("Wi-Fi failed");
+    while (true) delay(1000);
+  }
+  // Lower radio power; short range is fine for a nearby phone
+  WiFi.setTxPower(WIFI_POWER_11dBm);
+
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/command", HTTP_GET, handleCommand);
+  server.on("/status", HTTP_GET, handleStatus);
+  server.begin();
+
+  Serial.print("Open http://");
+  Serial.println(WiFi.softAPIP());
+}
+
+void loop() {
+  server.handleClient();
+
+  unsigned long now = millis();
+
+  // Safety: stop if commands stop arriving
+  if (driveState[0] != 'S' && now - lastDrive > TIMEOUT_MS) stopDrive();
+  if (liftState[0] != 'S' && now - lastLift > TIMEOUT_MS) stopLift();
+
+  delay(5);  // short sleep lets the CPU idle
+}
