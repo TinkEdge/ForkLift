@@ -1,4 +1,4 @@
-# 🚜 ESP32 Wi-Fi Controlled Forklift Robot
+# 🚜 Customizable Forklift Robot Kit
 
 A compact **ESP32-based Wi-Fi Controlled Forklift Robot** designed to demonstrate wireless robotic movement, motor control, and material-lifting operations.
 
